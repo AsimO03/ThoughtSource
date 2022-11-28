@@ -40,6 +40,8 @@ def generate_and_extract(data, config):
             Default: "all" (All items are used)
         "debug": bool - Determines whether the api is called or a mock is returned, used for debugging,
             Default: True (api is not used)
+        "question_type": ["chain_of_thought"], # defines which type of questioning is used, Default: "chain_of_thought"
+            options: "chain_of_thought", "self_ask_with_search"
         "instruction_keys": list(str) - Determines which instruction_keys are used from templates.json,
             Default: "all" (All used)
         "cot_trigger_keys": list(str) - Determines which cot triggers are used from templates.json,
@@ -129,6 +131,7 @@ def _generate_and_extract(
     idx,
     idx_range="all",
     author="",
+    question_type="chain_of_thought",
     api_service="openai",
     engine="text-davinci-002",
     temperature=0,
@@ -138,8 +141,8 @@ def _generate_and_extract(
     cot_trigger_keys="all",
     answer_extraction_keys="all",
     debug=True,
-    warn=True,
     verbose=False,
+    warn=True,
 ):
     """
     The function takes in a JSON object (item) and generates a CoT (Chain-of-Thought) for each combination of
@@ -173,105 +176,190 @@ def _generate_and_extract(
 
     prompt = item["question"] + "\n" + answer_choices_letters + "\n"
 
-    for instruction_key in instruction_keys:
 
-        if instruction_key is not None:
-            instruction_promt = (
-                TEMPLATES["instructions"][instruction_key] + "\n" + prompt
-            )
-        else:
-            instruction_promt = prompt
+    if question_type == "self_ask_with_search":
 
-        for cot_trigger_key in cot_trigger_keys:
-            generated_cot = {
-                "templates_version": TEMPLATES["version"],
-                "instruction": instruction_key,
-                "cot-trigger": cot_trigger_key,
-                "cot": "",
-                "answers": [],
-                "author": author,
-                "date": "",
-                "api_service": api_service,
-                "model": {
-                    "name": engine,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
-                "comment": "",
-                "annotation": [],
-            }
+        from langchain import SelfAskWithSearchChain, OpenAI, SerpAPIChain
 
-            if cot_trigger_key is not None:
-                generate_cot_prompt = (
-                    instruction_promt
-                    + TEMPLATES["cot-triggers"][cot_trigger_key]
+        generated_cot = {
+            "templates_version": TEMPLATES["version"],
+            # no instruction key
+            "instruction": "",
+            # no cot trigger key
+            "cot-trigger": "",
+            "cot": "",
+            "answers": [],
+            "author": author,
+            "date": "",
+            "api_service": api_service,
+            "model": {
+                "name": engine,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            "comment": "",
+            "annotation": [],
+        }
+        
+        # TODO: add model parameters
+        llm = OpenAI(temperature=0)
+        search = SerpAPIChain()
+
+        self_ask_with_search = SelfAskWithSearchChain(llm=llm, search_chain=search, verbose=True)
+
+        cot = self_ask_with_search.run(prompt)
+
+        generated_cot["cot"] = cot
+        generated_cot["date"] = print_now(1)
+
+        #TODO: define prompt better
+        generate_cot_prompt = prompt
+
+        for answer_extraction_key in answer_extraction_keys:
+            if answer_extraction_key is None:
+                pass
+
+            else:
+                answer = {
+                    "answer-extraction": answer_extraction_key,
+                    "answer": "",
+                    "correct_answer": None,
+                }
+
+                answer_extraction_prompt = (
+                    generate_cot_prompt
+                    + cot
+                    + "\n"
+                    + TEMPLATES["answer-extractions"][answer_extraction_key]
                     + "\n"
                 )
+
+                if verbose:
+                    print("\n------------------ANSWER EXTRACTION-------------------")
+                    print(answer_extraction_prompt)
+
+                # TODO: if self_ask_with_search: which model to make answer extraction
+                # I would just take the same model as for the task...
+                predicted_answer = query_model(
+                    answer_extraction_prompt,
+                    api_service,
+                    engine,
+                    temperature,
+                    max_tokens,
+                    api_time_interval,
+                    debug,
+                )
+                if verbose:
+                    print("\n------------------EXTRACTED ANSWER-------------------")
+                    print(predicted_answer)
+
+                answer["answer"] = predicted_answer
+                generated_cot["answers"].append(answer)
+        item["generated_cot"].append(generated_cot)
+
+        return item
+
+
+
+
+
+    if question_type == "chain_of_thought":
+
+        for instruction_key in instruction_keys:
+
+            if instruction_key is not None:
+                instruction_promt = (
+                    TEMPLATES["instructions"][instruction_key] + "\n" + prompt
+                )
             else:
-                generate_cot_prompt = instruction_promt
+                instruction_promt = prompt
 
-            if verbose:
-                print("\n-------------------COT TRIGGER-------------------")
-                print(generate_cot_prompt)
+            for cot_trigger_key in cot_trigger_keys:
+                generated_cot = {
+                    "templates_version": TEMPLATES["version"],
+                    "instruction": instruction_key,
+                    "cot-trigger": cot_trigger_key,
+                    "cot": "",
+                    "answers": [],
+                    "author": author,
+                    "date": "",
+                    "api_service": api_service,
+                    "model": {
+                        "name": engine,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    },
+                    "comment": "",
+                    "annotation": [],
+                }
 
-            cot = query_model(
-                generate_cot_prompt,
-                api_service,
-                engine,
-                temperature,
-                max_tokens,
-                api_time_interval,
-                debug,
-            )
-            if verbose:
-                print("\n------------------GENERATED COT-------------------")
-                print(cot)
-
-            generated_cot["cot"] = cot
-            generated_cot["date"] = print_now(1)
-
-            for answer_extraction_key in answer_extraction_keys:
-                if answer_extraction_key is None:
-                    pass
-
+                if cot_trigger_key is not None:
+                    generate_cot_prompt = (
+                        instruction_promt
+                        + TEMPLATES["cot-triggers"][cot_trigger_key]
+                        + "\n"
+                    )
                 else:
-                    answer = {
-                        "answer-extraction": answer_extraction_key,
-                        "answer": "",
-                        "correct_answer": None,
-                    }
+                    generate_cot_prompt = instruction_promt
 
-                    answer_extraction_prompt = (
-                        generate_cot_prompt
-                        + cot
-                        + "\n"
-                        + TEMPLATES["answer-extractions"][answer_extraction_key]
-                        + "\n"
-                    )
-                    if verbose:
-                        print(
-                            "\n------------------ANSWER EXTRACTION-------------------"
+                if verbose:
+                    print("\n-------------------COT TRIGGER-------------------")
+                    print(generate_cot_prompt)
+                cot = query_model(
+                    generate_cot_prompt,
+                    api_service,
+                    engine,
+                    temperature,
+                    max_tokens,
+                    api_time_interval,
+                    debug,
+                )
+                if verbose:
+                    print("\n------------------GENERATED COT-------------------")
+                    print(cot)
+                generated_cot["cot"] = cot
+                generated_cot["date"] = print_now(1)
+
+                for answer_extraction_key in answer_extraction_keys:
+                    if answer_extraction_key is None:
+                        pass
+
+                    else:
+                        answer = {
+                            "answer-extraction": answer_extraction_key,
+                            "answer": "",
+                            "correct_answer": None,
+                        }
+
+                        answer_extraction_prompt = (
+                            generate_cot_prompt
+                            + cot
+                            + "\n"
+                            + TEMPLATES["answer-extractions"][answer_extraction_key]
+                            + "\n"
                         )
-                        print(answer_extraction_prompt)
+                        if verbose:
+                            print("\n------------------ANSWER EXTRACTION-------------------")
+                            print(answer_extraction_prompt)
 
-                    predicted_answer = query_model(
-                        answer_extraction_prompt,
-                        api_service,
-                        engine,
-                        temperature,
-                        max_tokens,
-                        api_time_interval,
-                        debug,
-                    )
-                    if verbose:
-                        print("\n------------------EXTRACTED ANSWER-------------------")
-                        print(predicted_answer)
+                        predicted_answer = query_model(
+                            answer_extraction_prompt,
+                            api_service,
+                            engine,
+                            temperature,
+                            max_tokens,
+                            api_time_interval,
+                            debug,
+                        )
+                        if verbose:
+                            print("\n------------------EXTRACTED ANSWER-------------------")
+                            print(predicted_answer)
 
-                    answer["answer"] = predicted_answer
-                    generated_cot["answers"].append(answer)
-            item["generated_cot"].append(generated_cot)
+                        answer["answer"] = predicted_answer
+                        generated_cot["answers"].append(answer)
+                item["generated_cot"].append(generated_cot)
 
-    return item
+        return item
 
 
 def query_model(
@@ -280,7 +368,7 @@ def query_model(
     if debug:
         return "test"
 
-    # lanchain package implementation
+    # langchain package implementation
     else:
         from langchain import LLMChain, Prompt
 
